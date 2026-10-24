@@ -1,158 +1,100 @@
-# web scraping c#: build your first scraper with HttpClient, then handle the blocking problem with real pricing math
+# scrape single page application: three methods that actually work, what JavaScript rendering really costs, and when to skip the headless browser
 
-# is a solid choice for web scraping in 2026, especially if your scraper lives inside a larger .NET app. HttpClient ships with the runtime, HtmlAgilityPack and AngleSharp handle HTML parsing, and Playwright for .NET covers JavaScript-rendered pages. But here's the part most tutorials gloss over: writing the scraper is the easy 20%. Not getting blocked across thousands of requests is the other 80%, and that's where a scraping API like ScraperAPI earns its keep.
+To scrape a single page application, you have three workable options: replay the JSON API the SPA pulls data from, run your own headless browser, or send the URL to a scraping API that renders JavaScript for you. The first is cheapest when it works, the second gives you full control but means maintaining Chromium infrastructure, and the third trades credits for engineering time. This guide covers how each route works, where they break, and — if you go the API route — the real per-request cost math behind ScraperAPI's plans, because the number on the pricing page and the number of pages you actually get are very different things.
 
-# stack, the pitfalls that break .NET scrapers under load. Then the scaling problem, and what it actually costs to solve it: full ScraperAPI plan pricing, the credit consumption rules that most reviews never explain, and which plan fits which situation.
+> **Quick take:** for most developers scraping a few thousand to a hundred thousand pages a month from React/Vue/Angular sites, ScraperAPI's Hobby plan ($49/month, 100,000 credits) with the `render=true` parameter is the fastest path. A 7-day trial with 5,000 credits lets you confirm your target renders correctly before paying anything.
+>
+> 👉 [Start the 7-day trial and test JavaScript rendering on your target SPA](https://www.scraperapi.com/pricing?fp_ref=coupons)
 
-> **Quick picks**
-> - Just learning, or scraping open sites? HttpClient + HtmlAgilityPack is all you need. No paid anything.
-# parsing code and route the fetch through ScraperAPI. The **Hobby plan is $49/month for 100,000 credits**, and every paid plan includes JS rendering, residential/mobile proxies, and CAPTCHA handling.
-> - New accounts get a **7-day free trial with 5,000 credits, no credit card required**, plus 1,000 free monthly credits on the free plan.
-> - 👉 [Start the free trial and test ScraperAPI against your target sites](https://www.scraperapi.com/?fp_ref=coupons)
+## Why a plain HTTP request returns an empty shell
 
-## The C# scraping stack: what to use, and when to level up
+A single page application builds its interface in the browser. The initial HTML you fetch is nearly empty — a root `<div>` and a pile of script tags. The actual data arrives after JavaScript runs, usually via calls to an internal JSON API. That's why `requests.get()` or `curl` on a React/Vue/Angular page gives you a blank document with no product data in it.
 
-# scraping job, and the right one depends on whether the data sits in the initial HTML.
+Every method below is a different answer to the same question: how do you get the data that only exists after the JavaScript runs? You can either intercept the data before it's rendered, execute the JavaScript yourself, or have someone else's browser execute it for you.
 
-| Tool | Role | Handles JavaScript? | Difficulty |
-| --- | --- | --- | --- |
-| HttpClient | Fetching pages and JSON APIs (built into .NET) | No | Easy |
-| HtmlAgilityPack | Parsing messy HTML with XPath | No | Easy |
-| AngleSharp | Parsing with CSS selectors, standards-compliant DOM | No | Medium |
-| Playwright for .NET | Driving a real headless browser | Yes | Medium |
+## Route 1: replay the API behind the SPA
 
-Selenium WebDriver is a fifth option for legacy or cross-browser needs, and it has the largest pool of existing examples. Current stable versions on NuGet as of June 2026: HtmlAgilityPack 1.12.4, AngleSharp 1.5.0, Microsoft.Playwright 1.60.0, CsvHelper 33.1.0. On a real project, pin versions with `--version` so a library update doesn't silently change parsing behavior under you.
+This is the cheapest and most reliable route when the target allows it. Open the site in your browser, open the Network tab, filter for XHR/fetch requests, and load the page. You'll usually see requests to endpoints like `/api/products?page=1&per_page=50` returning clean JSON with everything the frontend displays.
 
-The decision rule is simple. Start with HttpClient plus HtmlAgilityPack — or AngleSharp if you prefer CSS selectors over XPath. Only reach for Playwright when the data genuinely isn't in the initial HTML and the page is built by JavaScript. Every step up costs speed and adds complexity, and HttpClient plus a parser handles most real sites.
+Replaying that endpoint with a plain request costs you one normal HTTP call — no browser, no rendering overhead, no waiting on selectors. For stable, unauthenticated endpoints this beats everything else on this page hands down.
 
-# wins when the scraper is part of a larger typed system — an ASP.NET app, a worker service, an Azure pipeline — rather than a standalone script.
+The catch: internal APIs aren't meant for you. They can change without notice, require session tokens or signed parameters, and some validate headers or reject anything that doesn't look like it came from the frontend. If the endpoint is locked down, move on to Route 2 or 3.
 
-## Building a first C# scraper: the setup and the traps
+## Route 2: run your own headless browser
 
-The basic skeleton is a four-step loop: fetch with HttpClient, parse with HtmlAgilityPack, extract with XPath, write out with CsvHelper. Setting it up takes three commands:
+Puppeteer or Playwright driving headless Chromium executes the page's JavaScript for real, so you get exactly what a visitor sees. Launch a browser context with a realistic user agent and viewport, navigate, wait for a key selector to appear, then extract from the DOM. The setup is well documented and costs nothing in licensing.
 
-bash
-dotnet new console -n BookScraper
-cd BookScraper
-dotnet add package HtmlAgilityPack --version 1.12.4
-dotnet add package CsvHelper --version 33.1.0
+What most tutorials underplay is the ongoing operational load. Browsers leak memory over long runs. You need your own proxy rotation when targets rate-limit by IP. CAPTCHAs are your problem. And each rendered page is slow — you're loading a full browser for every URL. For a one-off project, fine. For a pipeline you maintain weekly, it becomes a part-time job, which is precisely the trade a rendering API is priced against.
 
+## Route 3: a scraping API renders JavaScript for you
 
-HttpClient needs no package at all; it lives in `System.Net.Http` in the runtime. A minimal fetch-and-parse against a practice sandbox like books.toscrape.com runs about 15 lines: `GetStringAsync` for the page, then XPath queries like `//article[@class='product_pod']` to pull titles and prices, with `HtmlEntity.DeEntitize()` to clean up encoded entities like `&amp;`.
+Add one parameter and the heavy lifting moves off your machine. With ScraperAPI, you send your target URL with `render=true`, and the request routes through a Chromium instance that executes the page's JavaScript before returning the rendered HTML. Proxy rotation, retries, CAPTCHA handling, and header management happen on their side — no proxy lists, no Playwright configuration, no solver subscriptions.
 
-Three details separate a working scraper from one that breaks on the first real site:
+Two details from their documentation matter a lot for SPA scraping, and most reviews skip them entirely:
 
-1. **Reuse one HttpClient instance.** Creating a fresh HttpClient per request is the classic .NET mistake — under load it exhausts sockets. Declare it `static readonly`, or register it through `IHttpClientFactory` for long-running services.
-2. **Set a browser-style User-Agent.** The default .NET client string gets blocked by many sites outright. Adding a realistic `User-Agent` header is a one-liner that prevents a whole category of 403s.
-3. **Check status codes.** Call `EnsureSuccessStatusCode()` or use `GetAsync` so a 403 or 404 error page never gets parsed as if it were data.
+1. **Missing elements have a fix.** To keep requests fast, the API doesn't render everything on the page by default — it skips images and tracking scripts, and sometimes that skips data you actually need. The `wait_for_selector=x` parameter tells it to wait until a specific selector appears before returning the response. If your first render comes back without the data, this is usually why.
+2. **Rendering has its own throttle.** The render burst limit is 10 requests per second by default. If each rendered request takes 25 seconds and you fire 10 per second, you can have up to 250 rendering requests running concurrently. Enterprise users can arrange higher limits with support.
 
-For pagination, don't hardcode page counts. Loop until a page returns no results, track visited URLs in a `HashSet`, and throttle with `Task.Delay` of one to a few seconds — ideally randomized. Firing hundreds of requests per second is the fastest way to get an IP rate-limited or banned, which brings us to the real problem.
+The rendered response also supports an instruction set — clicks, form input, scrolling, waiting for specific events — so you can handle SPAs that need interaction before the data appears, all through parameters on the same request.
 
-## Where DIY C# scraping stops working
+## What JavaScript rendering actually costs: credits are not requests
 
-# scraping works fine on friendly sites and falls apart on protected commercial targets. The numbers are stark. Independent testing by Scrapeway in their July 2026 benchmark found that even the best commercial anti-bot APIs top out around 99% success against protected targets — while cheaper tools land far lower, with Proxyway measuring Firecrawl near 33% on defended sites. A C# scraper with no proxy rotation does much worse than any of them.
+This is the part that trips people up. ScraperAPI prices in credits, and one credit equals one standard page request. But the cost per request depends on the target and your parameters. Their official pricing FAQ is explicit: a standard page costs 1 credit, Amazon pages cost 5, Google and Bing cost 25, LinkedIn costs 30, and sites behind Cloudflare, Datadome, or PerimeterX add 10 credits per request when their protection is bypassed.
 
-Vendor success-rate claims don't help much either. ScraperAPI's own quick-start guide points out that published web scraping success rates run anywhere from 40% to 100%, and the only number that matters is the one against your target sites — which is exactly why testing before committing matters.
+JavaScript rendering adds on top: **every JS-rendered request costs 10 credits**. With premium proxies it's 25; with ultra premium proxies, 75. Their docs even recommend using rendering only when you absolutely need it, because it adds latency and can lower success rates.
 
-# scrapers keep their parsing code and swap out the fetch layer.
+Run the math on the Hobby plan's 100,000 credits. On static pages, that's 100,000 real fetches. Turn on JS rendering for a typical SPA workload and it's about 10,000 rendered pages. Same plan, one-tenth the output — and that gap is exactly what most competitor articles don't spell out. Before committing to any plan size, open the dashboard's Domain Cost Estimator, check the exact per-URL cost for your targets, and set `max_cost` per scrape so a single request can't quietly eat more credits than you expect.
 
-## How ScraperAPI plugs into a C# scraper
+👉 [Check plan sizes against your real request volume on the pricing page](https://www.scraperapi.com/pricing?fp_ref=coupons)
 
-# code calls its endpoint with your API key and the target URL, and it returns the page HTML after handling proxy rotation, CAPTCHAs, and (optionally) JS rendering on its side.
+## All current plans at a glance
 
-# SDK — ScraperAPI ships SDKs for Python, Node, PHP, Ruby, and Java — but since it's a REST endpoint, HttpClient is all a C# project needs:
+Every paid plan includes JS rendering, premium residential and mobile IPs, rotating proxy pools, CAPTCHA and anti-bot handling, automatic retries, JSON auto parsing, and unlimited bandwidth. Annual billing takes 10% off every tier. Here's the full lineup as listed on the official pricing page:
 
-csharp
-static readonly HttpClient http = new HttpClient();
+| Plan | Monthly price | Annual (per month) | API credits/mo | Concurrency | Get it |
+| --- | --- | --- | --- | --- | --- |
+| Free | $0 | — | 1,000 (5 concurrent) | 5 | [Start free](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Hobby | $49 | $44.10 | 100,000 | 20 | [Get Hobby](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Startup | $149 | $134.10 | 1,000,000 | 50 | [Get Startup](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Business | $299 | $269.10 | 3,000,000 | 100 | [Get Business](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Scaling | $475 | $427.50 | 5,000,000 | 200 | [Get Scaling](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Professional | $975 | $877.50 | 10,500,000 | 300 | [Get Professional](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Advanced | $1,975 | $1,777.50 | 21,500,000 | 500 | [Get Advanced](https://www.scraperapi.com/pricing?fp_ref=coupons) |
+| Enterprise | Custom | Custom | 22,000,000+ | 500+ | [Contact sales](https://www.scraperapi.com/contact-sales/?fp_ref=coupons) |
 
-string html = await http.GetStringAsync(
-    "https://api.scraperapi.com/?api_key=YOUR_KEY" +
-    "&url=https://example.com/product-page&render=true");
+A few billing details that only show up in the FAQ, all of which affect real usage:
 
+- **Trial before commitment:** a 7-day trial with 5,000 credits, no credit card required. Sign-up alone gets you 1,000 free credits at 5 concurrent connections, and support can grant extra testing credits.
+- **When credits run out:** scraping pauses until renewal by default. Hobby through Professional offer opt-in auto-upgrade; Scaling and above offer pay-as-you-go at a fixed per-credit rate with a monthly cap you set.
+- **Concurrency overruns are free:** exceeding your thread limit returns a 429 and the request is turned away rather than queued — no extra charge for trying.
 
-# code. There's also a DataPipeline option for teams who want scheduled collection without writing scraping code at all.
+## How ScraperAPI compares for SPA work
 
-The practical integration pattern: keep HtmlAgilityPack for parsing, and decide per request whether to route the fetch through ScraperAPI based on how hostile the target is. Friendly internal or open sites stay on plain HttpClient; protected commercial targets go through the API. To see how your own targets behave before paying anything, 👉 [claim the 5,000-credit free trial and run it against your real target URLs](https://www.scraperapi.com/?fp_ref=coupons).
+Against doing it yourself, the comparison is honest: you're paying credits to avoid proxy management, browser maintenance, and CAPTCHA infrastructure. One reviewer's framing is hard to improve on — raw residential proxies plus your own Playwright cluster cost less per request at high volume, but it's trading money for engineering time. If your monthly volume sits in the 1,000–100,000 page range and your targets are JavaScript-heavy, that trade usually favors the API.
 
-## ScraperAPI plans and pricing: the full table
+Against enterprise-grade tools, the picture is more mixed. Bright Data's Web Unlocker measures around 95–98% success on protected targets in independent benchmarks, versus roughly 62–72% overall for ScraperAPI (two separate benchmarks: one at 72.57%, another around 62.8–63.7%) — but Bright Data costs meaningfully more and carries more setup friction. On Cloudflare and DataDome targets specifically, reviewers report ScraperAPI sometimes returning outright 500 errors where stronger tools get through. ScrapeOps, a proxy aggregator that routes through multiple providers per request, makes sense if you already handle rendering yourself and want raw proxy access.
 
-All paid plans include the same feature set — JS rendering, premium proxies, structured data endpoints, CAPTCHA handling, unlimited bandwidth, a 99.9% uptime SLA. The tiers differ in credits, concurrency, and geotargeting. Annual billing takes 10% off across the board.
+None of these are links you need — the point is that the right tool depends on how hard your targets fight back. For the easy-to-moderate 80% of SPA scraping, ScraperAPI's combination of a simple endpoint and built-in rendering is a reasonable price for not running your own browser fleet.
 
-| Plan | Price (monthly / billed annually) | Credits / month | Concurrency | Buy |
-| --- | --- | --- | --- | --- |
-| Free | $0 | 1,000 | 5 | [ 注册免费账户](https://www.scraperapi.com/?fp_ref=coupons) |
-| Hobby | $49 / $44.10 per month | 100,000 | 20 | [ 开通 Hobby](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Startup | $149 / $134.10 per month | 1,000,000 | 50 | [ 开通 Startup](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Business | $299 / $269.10 per month | 3,000,000 | 100 | [ 开通 Business](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Scaling (marked most popular) | $475 / $427.50 per month | 5,000,000 | 200 | [ 开通 Scaling](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Professional | $975 / $877.50 per month | 10,500,000 | 300 | [ 开通 Professional](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Advanced | $1,975 / $1,777.50 per month | 21,500,000 | 500 | [ 开通 Advanced](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
-| Enterprise | Custom quote | 22,000,000+ | 500+ | [ 联系销售定制](https://www.scraperapi.com/pricing/?fp_ref=coupons) |
+## Where people get burned (and how to avoid it)
 
-Geotargeting is the quiet differentiator most comparison tables skip:
+Two failure modes recur in third-party reviews, and both have workarounds you can set up on day one.
 
-- **Hobby and Startup**: US and EU locations only
-- **Business and up**: country-level geotargeting anywhere in the 50+ country pool
+First, CAPTCHA or error pages sometimes come back coded as "successful" responses — and get billed as credits. Reviewers recommend spot-checking responses for CAPTCHA markers rather than trusting the HTTP status. The `max_cost` parameter doesn't fix this directly, but reviewing your dashboard's per-domain costs makes anomalies visible quickly. If you do get incorrectly billed, support refunds it once flagged.
 
-New users can apply the promo code **START10** at checkout for 10% off the first month on any subscription, on top of the annual discount. For a Hobby plan billed annually, that works out to roughly $39.69 for the first month before settling at $44.10.
+Second, speed. Independent benchmarks logged 20–40 seconds per request on targets like Amazon and Glassdoor. For a price-monitoring job where timing matters, that latency plus the Hobby plan's 20-thread cap is a real constraint. Batch jobs scheduled through their DataPipeline don't care; a dashboard that needs fresh prices every minute does.
 
-## The credit math most reviews skip
+One more thing worth knowing before you commit: there's no meaningful free tier. The free 1,000 credits are for testing, and the 7-day trial is the real evaluation window. Run your actual targets through it with `render=true` and the correct `wait_for_selector` values, count the credits each page really consumes, then size your plan from measured data.
 
-"100,000 credits for $49" sounds straightforward until you read the consumption rules, because a credit is not always a page.
+## Picking a plan and place to start
 
-The base rate is 1 credit per standard request. Then the multipliers kick in:
+Match the plan to your measured volume, not the credits number:
 
-| What you request | Credits per request |
-| --- | --- |
-| Standard page | 1 |
-| Amazon (custom scraper) | 5 |
-| Google or Bing, all subdomains | 25 |
-| LinkedIn | 30 |
-| Cloudflare / Datadome / PerimeterX bypass | +10 |
-| `render=true` (JS rendering) | 10 total |
-| `premium=true` + `render=true` | 25 total |
-| `ultra_premium=true` + `render=true` | 75 total |
+- **Testing or a small one-off:** start with the free 1,000 credits, then the 7-day trial's 5,000. If your target needs rendering, that's only 500 rendered pages — enough to validate the approach.
+- **A side project or small pipeline:** Hobby at $49/month ($44.10 on annual). Keep JS rendering off where the API replay route works, spend rendering credits only where you must, and 100,000 credits goes a long way.
+- **Multi-client or production workloads:** Startup or Business, where per-credit cost drops sharply ($0.149 down to $0.10 per thousand at Business) and concurrency stops being the bottleneck.
+- **Heavily protected targets at scale:** be honest with yourself about the benchmark numbers. If your list is mostly Cloudflare/DataDome sites, a stronger (and pricier) unlocker or a self-managed proxy setup will serve you better than a bigger plan here.
 
-Run the numbers on a Hobby plan and the picture changes. 100,000 credits is 100,000 standard pages — or about 20,000 Google results pages, or 4,000 Google pages with rendering enabled. If your project scrapes SERP data daily, Hobby runs dry in weeks, and knowing that before checkout beats discovering it on invoice day.
+Whatever tier you land on, do the three checks first — replay-or-render test, Domain Cost Estimator readout, and a small-batch success-rate check during the trial — because those numbers, not the pricing page's headline credits, determine what you actually need.
 
-Three mechanisms keep this manageable, and they're the kind of detail that only shows up in the documentation:
-
-- **Only successful requests are billed** — status codes 200 and 404. Failed fetches due to blocks or timeouts don't burn credits, unless you cancel a request before its 70-second completion limit.
-# code can log real costs per target site as it runs.
-- **Cost estimation before you scrape.** The dashboard's Domain Cost Estimator tells you what any URL will cost, and there's a programmatic endpoint at `https://api.scraperapi.com/account/urlcost` that accepts all parameters — handy for checking what enabling `render=true` does to a specific target. You can also set a `max_cost` per scrape so no single request blows past a limit you choose.
-
-Exceeding your concurrency limit returns a 429 and charges nothing. Running out of credits mid-month pauses scraping by default; you can pre-purchase more, enable auto-upgrade (available on Hobby through Professional), or turn on pay-as-you-go (Scaling and up) to keep scraping at a fixed per-credit rate under a spending cap you set.
-
-## Which plan actually fits your project
-
-Match the plan to your target sites and monthly volume, and the decision mostly makes itself:
-
-- **Learning, side projects, or evaluating**: the free plan's 1,000 monthly credits plus the 5,000-credit trial cost nothing and require no card. That's enough to test ScraperAPI's success rate against your specific targets.
-- **Standard pages, US/EU targets, under ~100k requests a month**: Hobby at $49 does the job. Just note the geotargeting ceiling — if you need Southeast Asian or Latin American localized data, Hobby can't provide it.
-- **SERP or Amazon data, or non-US/EU geotargeting**: start at Business ($299). Below that tier, the 25–30 credit domain multipliers and the US/EU-only locations will both bite. A million credits on Startup sounds generous until Google's 25-credit rate turns it into 40,000 searches.
-- **Production pipelines and agencies**: Scaling at $475 is the tier ScraperAPI itself marks as most popular, and it's the first one with pay-as-you-go headroom past your credit allowance.
-
-Before you commit to any tier, do one thing: run your five most important target URLs through the cost estimator, multiply by your monthly volume, and compare against the credit allowances in the table above. 👉 [Open the plan comparison and check costs for your own targets](https://www.scraperapi.com/pricing/?fp_ref=coupons)
-
-## FAQ
-
-**Is there an official ScraperAPI SDK for C#?**
-# projects use the REST endpoint directly with HttpClient, which works fine since the API is plain HTTP in and HTTP out — the response header `sa-credit-cost` even reports credit usage per request.
-
-**How much does scraping Google with ScraperAPI cost?**
-25 credits per request against Google or Bing including all subdomains, before parameters. Adding JS rendering on top brings a Google request to 35 credits. Check your exact targets with the API Playground or the `urlcost` endpoint before building around an assumption.
-
-**Does ScraperAPI charge for failed requests?**
-No. Only successful responses (status 200 and 404) consume credits, and so do requests you cancel before the 70-second completion window. Exceeding your concurrency limit returns a 429 with no charge.
-
-**Is there a free way to test it with C#?**
-Yes — a 7-day trial with 5,000 credits, no credit card, plus a permanent free plan with 1,000 credits a month and 5 concurrent connections. Both are enough to wire up an HttpClient call and measure real success rates on your targets.
-
-**Do any discounts stack?**
-Annual billing takes 10% off every paid plan, and the START10 promo code takes another 10% off the first month for new users at checkout.
-
-## The bottom line before you sign up
-
-# scraper only touches open, friendly sites, spend nothing — HttpClient and HtmlAgilityPack will carry you. The moment you're hitting Amazon, Google, LinkedIn, or anything behind Cloudflare at volume, routing the fetch through ScraperAPI from $49/month is cheaper than the developer weeks a DIY proxy stack consumes, and the trial lets you verify that on your own URLs before paying.
-
-Three things worth double-checking at checkout: estimate the credit cost of your actual targets first (SERP sites burn 25x faster than standard pages), confirm the geotargeting you need is included at your tier — Hobby and Startup are US/EU only — and decide between auto-upgrade and pay-as-you-go so a busy month doesn't silently pause your pipeline. 👉 [Start with the free 5,000-credit trial and pick your plan from real data](https://www.scraperapi.com/?fp_ref=coupons)
+👉 [Open the plans page and start your trial with 5,000 free credits](https://www.scraperapi.com/pricing?fp_ref=coupons)
